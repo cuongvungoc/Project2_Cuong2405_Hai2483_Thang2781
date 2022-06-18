@@ -89,9 +89,17 @@ struct thread
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
+    struct list_elem waitelem;
+    int64_t wakeup_ticks;
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
+
+    /* Thread's current working directory */
+    struct dir *working_dir;
+
+    struct lock *waiting_lock;          /* The lock object on which this thread is waiting (or NULL if not locked) */
+    struct list locks;                  /* List of locks the thread holds (for multiple donations) */
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */

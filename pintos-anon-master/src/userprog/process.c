@@ -15,9 +15,12 @@
 #include "threads/init.h"
 #include "threads/interrupt.h"
 #include "threads/palloc.h"
+#include "threads/malloc.h"
+#include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
+static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
 
@@ -28,9 +31,10 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
 tid_t
 process_execute (const char *file_name) 
 {
-  char *fn_copy;
+  char *fn_copy, *fn_copy2, *saveptn;
   tid_t tid;
 
+  sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
@@ -38,10 +42,40 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /* Make another copy for parsing name of executable */
+  fn_copy2 = palloc_get_page (0);
+  if(fn_copy2 == NULL)
+    return TID_ERROR;
+  strlcpy (fn_copy2, fn_copy, PGSIZE);
+
+  /* Check if file exists */
+  char *fn_exec = strtok_r (fn_copy2, " ", &saveptn);
+
+  if(!filesys_open (fn_exec)){
+    palloc_free_page (fn_copy);
+    palloc_free_page (fn_copy2);
+    return TID_ERROR;
+  }
+
+  /* Synchronize with load */
+  struct load_synch load_info;
+  load_info.filename = fn_copy;
+  sema_init (&(load_info.sema), 0);
+  load_info.success = true;
+  load_info.parent_working_dir = thread_current ()->working_dir;
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+  // tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (fn_exec, PRI_DEFAULT, start_process, (void *)(&load_info));
+  palloc_free_page (fn_copy2);
+  
+  /* Wait for load to complete */
+  sema_down (&(load_info.sema));
+
+  if (tid == TID_ERROR || load_info.success)
+    return TID_ERROR;
+  // if (tid == TID_ERROR)
+  //   palloc_free_page (fn_copy); 
   return tid;
 }
 
