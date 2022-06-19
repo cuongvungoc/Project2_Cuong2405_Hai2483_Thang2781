@@ -82,9 +82,11 @@ process_execute (const char *file_name)
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+// start_process (void *file_name_)
+start_process (void *load_info_)
 {
-  char *file_name = file_name_;
+  struct load_synch *load_info = (struct load_synch *) load_info_;
+  char *file_name = load_info -> filename;
   struct intr_frame if_;
   bool success;
 
@@ -95,10 +97,21 @@ start_process (void *file_name_)
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
+  /* If load failed, set load info and quit. */
   palloc_free_page (file_name);
-  if (!success) 
+  if (!success) {
+    load_info->success = false;
+    sema_up (&(load_info->sema));
     thread_exit ();
+  }
+
+  if (load_info->parent_working_dir != NULL)
+    thread_current() ->working_dir = dir_reopen(load_info->parent_working_dir);
+  else
+    thread_current() -> working_dir = dir_open_root();
+
+  load_info->success = true;
+  sema_up (&load_info->sema);
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -229,7 +242,7 @@ struct Elf32_Phdr
 #define PF_W 2          /* Writable. */
 #define PF_R 4          /* Readable. */
 
-static bool setup_stack (void **esp);
+static bool setup_stack (void **esp, char *exec_cmd);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
@@ -240,8 +253,16 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
 bool
-load (const char *file_name, void (**eip) (void), void **esp) 
+load (const char *file_name_, void (**eip) (void), void **esp) 
 {
+  /* Make 2 non-constant copies of file_name_ for 
+     tokenizing. First is mutated by call to strtok_r.
+     Second is muted in setup_stack */
+  char *file_name = palloc_get_page (0);
+  char *file_name2 = palloc_get_page (0);
+  strlcpy (file_name, file_name_, PGSIZE);
+  strlcpy (file_name2, file_name_, PGSIZE);
+  
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
   struct file *file = NULL;
@@ -255,13 +276,18 @@ load (const char *file_name, void (**eip) (void), void **esp)
     goto done;
   process_activate ();
 
+  char *saveptr;
+
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (strtok_r (file_name, " ", &saveptr));
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", file_name);
       goto done; 
     }
+  
+  add_fd (file);
+  file_deny_write (file);
 
   /* Read and verify executable header. */
   if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
@@ -336,7 +362,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
     }
 
   /* Set up stack. */
-  if (!setup_stack (esp))
+  if (!setup_stack (esp, file_name2))
     goto done;
 
   /* Start address. */
@@ -346,7 +372,9 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
+  palloc_free_page(file_name);
+  palloc_free_page(file_name2);
+  // file_close (file);
   return success;
 }
 
@@ -461,7 +489,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
 static bool
-setup_stack (void **esp) 
+setup_stack (void **esp, char *exec_cmd) 
 {
   uint8_t *kpage;
   bool success = false;
@@ -475,6 +503,73 @@ setup_stack (void **esp)
       else
         palloc_free_page (kpage);
     }
+
+  int token_count = 0;
+  size_t token_len;
+  char *save_ptr;
+  uint8_t *byte_page_ptr = (uint8_t *) *esp;
+
+  /* Count the number of tokens */
+  char *exec_cmd_tokens = palloc_get_page (0);
+  strlcpy (exec_cmd_tokens, exec_cmd, PGSIZE);
+
+  char *token = strtok_r (exec_cmd_tokens, " ", &save_ptr);
+  while (token != NULL) {
+    token_count ++;
+    token = strtok_r (NULL, " ", *save_ptr);
+  }
+  palloc_free_page (exec_cmd_tokens);
+
+  uint8_t *arg_addrs[token_count];
+
+  /* Populate the stack */
+  token_count = 0;
+  save_ptr = NULL;
+ 
+  /* Get first token, which we know must exist (filename) */
+  token = strtok_r (exec_cmd, " ", &save_ptr);
+
+  /* Copy token to page and get next. keep token count */
+  while (token != NULL){
+    token_len = strlen (token);
+    /* Add 1 for null terminator */
+    byte_page_ptr -= (token_len + 1);
+
+    strlcpy ((char *)byte_page_ptr, token, token_len + 1);
+    arg_addrs[token_count] = byte_page_ptr;
+    token_count++;
+    token = strtok_r (NULL, " ", &save_ptr);
+  }
+
+  /* word align down ("& 3" to get "mod 4" operation) */
+  byte_page_ptr -= ((int) byte_page_ptr) & 3;
+  uint32_t *word_page_ptr = (uint32_t *) byte_page_ptr;
+  word_page_ptr--;
+
+  /* add 0 to satisfy arv[argc] == 0 */
+  word_page_ptr[0] = (uint32_t) 0;
+
+  /* populate argv[i] */
+  int i;
+  for (i = 0; i < token_count; i++)
+    {
+      word_page_ptr--;
+      word_page_ptr[0] = (uint32_t) arg_addrs[token_count - i - 1];
+    }
+
+  /* argv */
+  word_page_ptr--;
+  word_page_ptr[0] = (uint32_t) (word_page_ptr + 1);
+
+  /* argc */
+  word_page_ptr--;
+  word_page_ptr[0] = (uint32_t) token_count;
+
+  /* fake return address */
+  word_page_ptr--;
+  word_page_ptr[0] = (uint32_t) 0; 
+  
+  *esp = (void *) word_page_ptr;
   return success;
 }
 
