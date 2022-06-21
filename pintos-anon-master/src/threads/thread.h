@@ -4,6 +4,8 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include <kernel/list.h>
+#include <threads/synch.h>
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -24,14 +26,17 @@ typedef int tid_t;
 #define PRI_DEFAULT 31                  /* Default priority. */
 #define PRI_MAX 63                      /* Highest priority. */
 
-/* A kernel thread or user process.
 
+
+struct lock filesys_lock; //a global lock on filesystem operations, to ensure thread safety.
+#define INIT_EXIT_STAT -2333 
+
+/* A kernel thread or user process.
    Each thread structure is stored in its own 4 kB page.  The
    thread structure itself sits at the very bottom of the page
    (at offset 0).  The rest of the page is reserved for the
    thread's kernel stack, which grows downward from the top of
    the page (at offset 4 kB).  Here's an illustration:
-
         4 kB +---------------------------------+
              |          kernel stack           |
              |                |                |
@@ -53,22 +58,18 @@ typedef int tid_t;
              |               name              |
              |              status             |
         0 kB +---------------------------------+
-
    The upshot of this is twofold:
-
       1. First, `struct thread' must not be allowed to grow too
          big.  If it does, then there will not be enough room for
          the kernel stack.  Our base `struct thread' is only a
          few bytes in size.  It probably should stay well under 1
          kB.
-
       2. Second, kernel stacks must not be allowed to grow too
          large.  If a stack overflows, it will corrupt the thread
          state.  Thus, kernel functions should not allocate large
          structures or arrays as non-static local variables.  Use
          dynamic allocation with malloc() or palloc_get_page()
          instead.
-
    The first symptom of either of these problems will probably be
    an assertion failure in thread_current(), which checks that
    the `magic' member of the running thread's `struct thread' is
@@ -80,6 +81,8 @@ typedef int tid_t;
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
+
+
 struct thread
   {
     /* Owned by thread.c. */
@@ -89,17 +92,21 @@ struct thread
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
     struct list_elem allelem;           /* List element for all threads list. */
-    struct list_elem waitelem;
-    int64_t wakeup_ticks;
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
-    /* Thread's current working directory */
-    struct dir *working_dir;
-
-    struct lock *waiting_lock;          /* The lock object on which this thread is waiting (or NULL if not locked) */
-    struct list locks;                  /* List of locks the thread holds (for multiple donations) */
+    int64_t waketick;
+    bool load_success;  //if the child process is loaded successfully
+    struct semaphore load_sema;   // semaphore to keep the thread waiting until it makes sure whether the child process if successfully loaded.
+    int exit_status;    
+    struct list children_list;
+    struct thread* parent;   
+    struct file *self;  // its executable file
+    struct list opened_files;     //all the opened files
+    int fd_count;
+    //struct semaphore child_lock;
+    struct child_process * waiting_child;  //pid of the child process it is currently waiting
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -109,6 +116,18 @@ struct thread
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
+
+  struct child_process {
+      int tid;
+      struct list_elem child_elem;   // element of itself point to its parent's child_list
+      int exit_status;   //store its exit status to pass it to its parent 
+          
+      /*whether the child process has been waited()
+      according to the document: a process may wait for any given child at most once.
+      if_waited would be initialized to false*/
+      bool if_waited;
+      struct semaphore wait_sema;
+    };
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -146,4 +165,10 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
+bool cmp_waketick(struct list_elem *first, struct list_elem *second, void *aux);
+
 #endif /* threads/thread.h */
+
+#ifdef USERPROG
+struct list_elem *find_children_list(tid_t child_tid);
+#endif
