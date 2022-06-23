@@ -4,9 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
-#include <kernel/list.h>
-#include <threads/synch.h>
-
+#include "synch.h"
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -28,8 +26,6 @@ typedef int tid_t;
 
 
 
-struct lock filesys_lock; //a global lock on filesystem operations, to ensure thread safety.
-#define INIT_EXIT_STAT -2333 
 
 /* A kernel thread or user process.
    Each thread structure is stored in its own 4 kB page.  The
@@ -81,8 +77,6 @@ struct lock filesys_lock; //a global lock on filesystem operations, to ensure th
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
-
-
 struct thread
   {
     /* Owned by thread.c. */
@@ -96,39 +90,32 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
-    int64_t waketick;
-    bool load_success;  //if the child process is loaded successfully
-    struct semaphore load_sema;   // semaphore to keep the thread waiting until it makes sure whether the child process if successfully loaded.
-    int exit_status;    
-    struct list children_list;
-    struct thread* parent;   
-    struct file *self;  // its executable file
-    struct list opened_files;     //all the opened files
-    int fd_count;
-    //struct semaphore child_lock;
-    struct child_process * waiting_child;  //pid of the child process it is currently waiting
-
-#ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
-#endif
+    /*My code here */
+    int ret;                            /* exit status */  
+    struct semaphore sema;              /* The child process will wait on the semaphore */
+    struct thread *parent;              /* Parent process */
+    struct list fd_list;                /* Owned file descriptor */
+    struct list child_status;           /* The child process status list, so that the parent process can also obtain the status of the child process after the child process ends */  
+    struct child_process_status *relay_status;
+    struct file *execfile;
+    /*== My code here */ 
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
 
-  struct child_process {
-      int tid;
-      struct list_elem child_elem;   // element of itself point to its parent's child_list
-      int exit_status;   //store its exit status to pass it to its parent 
-          
-      /*whether the child process has been waited()
-      according to the document: a process may wait for any given child at most once.
-      if_waited would be initialized to false*/
-      bool if_waited;
-      struct semaphore wait_sema;
-    };
-
+struct child_process_status         /*The state of the process as a child process */
+{
+   int ret_status;  
+   int tid;               
+   struct thread* child;            /* Point to the child process, that is, the process that owns the structure */  
+   bool finish;                     /* Whether the child process has finished running */
+   bool iswaited;                   /* if process_wait() has already */
+   int loaded;                      /* Whether the loading is successful. */
+   struct list_elem elem;           /* elem for child_status */
+};
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
@@ -165,10 +152,4 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
-bool cmp_waketick(struct list_elem *first, struct list_elem *second, void *aux);
-
 #endif /* threads/thread.h */
-
-#ifdef USERPROG
-struct list_elem *find_children_list(tid_t child_tid);
-#endif
